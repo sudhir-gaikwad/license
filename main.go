@@ -3,9 +3,13 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
+	"go.uber.org/zap"
+	"license/log"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,48 +21,161 @@ type Application struct {
 	Comment       string
 }
 
-type Data struct {
-	LaptopCount  int
-	DesktopCount int
-}
+const (
+	filePath      = "sample-large.csv"
+	applicationId = "374"
+
+	// Set the number of goroutines (adjust based on system's capabilities)
+	numGoroutines = 4
+)
+
+var (
+	logger *zap.Logger
+	mu     sync.Mutex
+
+	// Variable to store the total minimum copies
+	minimumCopies int
+
+	// Map to store Laptop and Desktop count
+	computerCounts map[string]int
+
+	// Used to identify duplicate records
+	duplicates []string
+)
 
 func main() {
-	fmt.Println(time.Now().Format(time.RFC850))
+	// Initialize structured logging.
+	logger = log.InitLogger("info")
+	defer logger.Sync()
 
-	applicationId := "374"
-	file := "sample-large.csv"
+	startTime := time.Now()
 
-	data, err := readFile(file)
-	if err != nil {
-		fmt.Println("Error in processing request:", err)
-		return
+	computerCounts = make(map[string]int)
+
+	dataChannel := make(chan []Application, numGoroutines)
+	done := make(chan bool)
+	var wg sync.WaitGroup
+
+	// Process the csv data concurrently
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		logger.Debug("Stared goroutine", zap.Int("Count", i))
+		go processCSVData(dataChannel, &wg)
 	}
 
-	copiesRequired := calculateCopiesRequired(data, applicationId)
+	// Read the CSV file concurrently
+	readCSV(filePath, dataChannel, numGoroutines, done)
 
-	fmt.Printf("%d copies required for application %s, Input file: %s \n",
-		copiesRequired, applicationId, file)
-	fmt.Println(time.Now().Format(time.RFC850))
+	// Wait for all goroutines to finish
+	go func() {
+		wg.Wait()
+		done <- true
+	}()
+
+	<-done
+
+	logger.Info(strconv.Itoa(minimumCopies) + " copies required for " + applicationId + " for file " + filePath + " time taken: " + time.Since(startTime).String())
 }
 
-func readFile(filename string) ([]Application, error) {
-	fmt.Printf("Reading file: %s\n", filename)
+func readCSV(filePath string, dataChannel chan<- []Application, numGoroutines int, done chan<- bool) {
+	defer close(dataChannel)
+	var wgCsv sync.WaitGroup
 
-	file, err := os.Open(filename)
+	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		logger.Error("Error opening file", zap.Error(err))
+		done <- false
+		return
 	}
 	defer file.Close()
 
 	reader := csv.NewReader(file)
 	lines, err := reader.ReadAll()
 	if err != nil {
-		return nil, err
+		logger.Error("Error reading CSV", zap.Error(err))
+		done <- false
+		return
 	}
 
-	var data []Application
 	// Ignore header
-	for _, line := range lines[1:] {
+	lines = lines[1:]
+
+	// Split the lines among goroutines
+	chunkSize := len(lines) / numGoroutines
+
+	for i := 0; i < numGoroutines; i++ {
+		startIndex := i * chunkSize
+		endIndex := (i + 1) * chunkSize
+		if i == numGoroutines-1 {
+			endIndex = len(lines)
+		}
+
+		wgCsv.Add(1)
+		logger.Info("Add")
+		go func(start, end int) {
+			processChunk(lines[start:end], dataChannel)
+			wgCsv.Done()
+		}(startIndex, endIndex)
+	}
+
+	wgCsv.Wait()
+}
+
+func processCSVData(dataChannel <-chan []Application, wg *sync.WaitGroup) {
+
+	for apps := range dataChannel {
+		for _, app := range apps {
+			if app.ApplicationId == applicationId {
+				app.ComputerType = strings.ToUpper(app.ComputerType)
+				updated(app)
+			}
+		}
+	}
+
+	wg.Done()
+}
+
+func updated(app Application) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Do not process duplicate records
+	str := fmt.Sprintf("%s", app.ComputerId)
+	if slices.Contains(duplicates, str) {
+		return
+	}
+	duplicates = append(duplicates, str)
+
+	desktopKey := fmt.Sprintf("%s-%s", app.UserId, "DESKTOP")
+	laptopKey := fmt.Sprintf("%s-%s", app.UserId, "LAPTOP")
+
+	if app.ComputerType == "DESKTOP" {
+
+		laptopCount := computerCounts[laptopKey]
+
+		if laptopCount == 0 {
+			minimumCopies++
+			computerCounts[desktopKey]++
+		} else {
+			computerCounts[laptopKey]--
+		}
+
+	} else if app.ComputerType == "LAPTOP" {
+
+		desktopCount := computerCounts[desktopKey]
+
+		if desktopCount == 0 {
+			minimumCopies++
+			computerCounts[laptopKey]++
+		} else {
+			computerCounts[desktopKey]--
+		}
+	}
+}
+
+func processChunk(chunk [][]string, dataChannel chan<- []Application) {
+	var apps []Application
+	for _, line := range chunk {
 		app := Application{
 			ComputerId:    line[0],
 			UserId:        line[1],
@@ -66,101 +183,8 @@ func readFile(filename string) ([]Application, error) {
 			ComputerType:  line[3],
 			Comment:       line[4],
 		}
-		data = append(data, app)
-	}
-	return data, nil
-}
-
-func calculateCopiesRequired(applications []Application, applicationId string) int {
-
-	// Key: UserId-ApplicationId -> Uniquely maintain the count
-	// Value: Struct contains Laptop count and Desktop count
-	appCountMap := buildAppCountMap(applications, applicationId)
-	fmt.Println("buildAppCountMap--------------------------------")
-
-	// Calculate the total number of licenses required
-	totalLicenses := 0
-	for _, data := range appCountMap {
-
-		laptopCount := data.LaptopCount
-		desktopCount := data.DesktopCount
-
-		//fmt.Printf("Key: %s LaptopCount: %d DesktopCount: %d\n", key, laptopCount, desktopCount)
-
-		if desktopCount == laptopCount {
-			// If count of laptop and desktop are same then consider only one of them
-			totalLicenses = totalLicenses + desktopCount
-		} else {
-
-			total := desktopCount + laptopCount
-			if desktopCount > laptopCount {
-				// Reduce laptop count from the total count
-				totalLicenses = totalLicenses + (total - laptopCount)
-			} else {
-				// Reduce desktop count from the total count
-				totalLicenses = totalLicenses + (total - desktopCount)
-			}
-		}
+		apps = append(apps, app)
 	}
 
-	return totalLicenses
-}
-
-func buildAppCountMap(applications []Application, applicationId string) map[string]Data {
-	// Key: UserId-ApplicationId -> Uniquely maintain the count
-	// Value: Struct contains Laptop count and Desktop count
-	appCountMap := make(map[string]Data)
-
-	// Used to identify duplicate records
-	var duplicates []string
-
-	for _, app := range applications {
-
-		// Ignore the records which do not match with the given application id
-		if app.ApplicationId != applicationId {
-			continue
-		}
-
-		app.ComputerType = strings.ToUpper(app.ComputerType)
-
-		// Create a unique key for each user and application
-		key := fmt.Sprintf("%s-%s", app.UserId, app.ApplicationId)
-		//fmt.Printf("key------------: %s\n", key)
-
-		// Do not process duplicate records
-		str := fmt.Sprintf("%s-%s-%s", app.ComputerId, app.UserId, app.ApplicationId)
-		if slices.Contains(duplicates, str) {
-			continue
-		}
-		duplicates = append(duplicates, str)
-
-		if app.ComputerType == "LAPTOP" {
-
-			previousData, found := appCountMap[key]
-			if found {
-				previousData.LaptopCount++
-				appCountMap[key] = previousData
-			} else {
-				result := Data{
-					LaptopCount:  1,
-					DesktopCount: 0,
-				}
-				appCountMap[key] = result
-			}
-		} else {
-			previousData, found := appCountMap[key]
-			if found {
-				previousData.DesktopCount++
-				appCountMap[key] = previousData
-			} else {
-				result := Data{
-					LaptopCount:  0,
-					DesktopCount: 1,
-				}
-				appCountMap[key] = result
-			}
-		}
-	}
-
-	return appCountMap
+	dataChannel <- apps
 }

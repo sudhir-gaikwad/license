@@ -1,160 +1,83 @@
 package main
 
 import (
-	"os"
-	"reflect"
+	"github.com/stretchr/testify/assert"
+	"sync"
 	"testing"
 )
 
-func TestCalculateMinimumCopies(t *testing.T) {
-	tests := []struct {
-		name               string
-		inputData          []Application
-		inputApplicationId string
-		expectedResult     int
-	}{
-		{
-			name: "Scenario 1: One laptop and one desktop",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     1,
-		},
-		{
-			name: "Scenario 2: One laptop and three desktops",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-				{ComputerId: "3", UserId: "2", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-				{ComputerId: "4", UserId: "2", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     3,
-		},
-		{
-			name: "Scenario 3: Duplicate record",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "2", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "2", ApplicationId: "374", ComputerType: "desktop", Comment: "Exported from System B"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     2,
-		},
-		{
-			name: "Scenario 4",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-				{ComputerId: "3", UserId: "2", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     3,
-		},
-		{
-			name: "Scenario 5",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     2,
-		},
-		{
-			name: "Scenario 6",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     2,
-		},
-		{
-			name: "Scenario 6",
-			inputData: []Application{
-				{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "3", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Exported from System A"},
-				{ComputerId: "4", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Exported from System A"},
-			},
-			inputApplicationId: "374",
-			expectedResult:     3,
-		},
+func TestProcessCSVData(t *testing.T) {
+	// Initialize the test data
+	testData := []Application{
+		{ComputerId: "1", UserId: "1", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Comment1"},
+		{ComputerId: "2", UserId: "1", ApplicationId: "374", ComputerType: "LAPTOP", Comment: "Comment2"},
+		{ComputerId: "3", UserId: "2", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Comment3"},
+		{ComputerId: "4", UserId: "2", ApplicationId: "374", ComputerType: "DESKTOP", Comment: "Comment4"},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			result := calculateCopiesRequired(test.inputData, test.inputApplicationId)
-			if result != test.expectedResult {
-				t.Errorf("Expected %d, but got %d", test.expectedResult, result)
-			}
-		})
-	}
+	// Mocking the data channel
+	dataChannel := make(chan []Application, 1)
+	computerCounts = make(map[string]int)
+
+	defer close(dataChannel)
+
+	// Creating a wait group to synchronize the completion of the goroutine
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	// Run the goroutine with test data
+	go func() {
+		defer wg.Done()
+		processCSVData(dataChannel, &wg)
+	}()
+
+	// Send the test data to the data channel
+	dataChannel <- testData
+
+	// Close the data channel to signal the end of data
+	close(dataChannel)
+
+	// Wait for the goroutine to complete
+	wg.Wait()
+
+	// Assert the expected results based on the test data
+	assert.Equal(t, 3, minimumCopies) // One copy for each user, as Desktop and Laptop come in pairs
+	// Add more assertions based on your test cases
 }
 
-func TestReadFile(t *testing.T) {
-	// Prepare a sample CSV file content
-	csvContent := "ComputerId,UserId,ApplicationId,ComputerType,Comment\n1,1,12,LAPTOP,comment1\n2,1,12,DESKTOP,comment2\n"
+func TestUpdated(t *testing.T) {
+	// Reset global variables for each test case
+	minimumCopies = 0
+	computerCounts = make(map[string]int)
+	duplicates = []string{}
 
-	// Create a temporary file for testing
-	tempFile := createTempFile(t, csvContent)
-	defer tempFile.Close()
+	// Test case 1: One Desktop and one Laptop, one copy expected
+	app1 := Application{ComputerType: "DESKTOP", UserId: "1"}
+	app2 := Application{ComputerType: "LAPTOP", UserId: "1"}
+	updated(app1)
+	updated(app2)
+	assert.Equal(t, 1, minimumCopies)
 
-	// Call the function being tested
-	data, err := readFile(tempFile.Name())
-	if err != nil {
-		t.Fatalf("Error reading file: %v", err)
-	}
+	// Test case 2: Two Desktops and two Laptops, two copies expected (one copy for each pair)
+	app3 := Application{ComputerType: "DESKTOP", UserId: "2"}
+	app4 := Application{ComputerType: "DESKTOP", UserId: "2"}
+	app5 := Application{ComputerType: "LAPTOP", UserId: "2"}
+	app6 := Application{ComputerType: "LAPTOP", UserId: "2"}
+	updated(app3)
+	updated(app4)
+	updated(app5)
+	updated(app6)
+	assert.Equal(t, 2, minimumCopies)
 
-	// Define the expected result
-	expectedData := []Application{
-		{ComputerId: "1", UserId: "1", ApplicationId: "12", ComputerType: "LAPTOP", Comment: "comment1"},
-		{ComputerId: "2", UserId: "1", ApplicationId: "12", ComputerType: "DESKTOP", Comment: "comment2"},
-	}
-
-	// Compare the actual result with the expected result
-	if !reflect.DeepEqual(data, expectedData) {
-		t.Fatalf("Expected %v, got %v", expectedData, data)
-	}
-}
-
-func TestBuildAppCountMap(t *testing.T) {
-	// Prepare test data
-	applications := []Application{
-		{ComputerId: "1", UserId: "1", ApplicationId: "11", ComputerType: "LAPTOP"},
-		{ComputerId: "2", UserId: "1", ApplicationId: "11", ComputerType: "DESKTOP"},
-		{ComputerId: "3", UserId: "2", ApplicationId: "11", ComputerType: "DESKTOP"},
-	}
-
-	// Call the function being tested
-	result := buildAppCountMap(applications, "11")
-
-	// Define the expected result
-	expectedResult := map[string]Data{
-		"1-11": {LaptopCount: 1, DesktopCount: 1},
-		"2-11": {LaptopCount: 0, DesktopCount: 1},
-	}
-
-	// Compare the actual result with the expected result
-	if !reflect.DeepEqual(result, expectedResult) {
-		t.Fatalf("Expected %v, got %v", expectedResult, result)
-	}
-}
-
-func createTempFile(t *testing.T, content string) *os.File {
-	t.Helper()
-
-	tempFile, err := os.CreateTemp("", "test*.csv")
-	if err != nil {
-		t.Fatalf("Error creating temporary file: %v", err)
-	}
-
-	_, err = tempFile.WriteString(content)
-	if err != nil {
-		t.Fatalf("Error writing to temporary file: %v", err)
-	}
-
-	return tempFile
+	// Test case 3: One Desktop and three Laptops, three copies expected (one copy for each Laptop)
+	app7 := Application{ComputerType: "DESKTOP", UserId: "3"}
+	app8 := Application{ComputerType: "LAPTOP", UserId: "3"}
+	app9 := Application{ComputerType: "LAPTOP", UserId: "3"}
+	app10 := Application{ComputerType: "LAPTOP", UserId: "3"}
+	updated(app7)
+	updated(app8)
+	updated(app9)
+	updated(app10)
+	assert.Equal(t, 3, minimumCopies)
+	// Add more test cases as needed
 }
